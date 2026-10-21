@@ -1,0 +1,11 @@
+{
+  "dependencies": {
+    "@babel/core": "^8.0.7",
+    "@babel/plugin-transform-unicode-property-regex": "^8.0.1",
+    "@babel/plugin-transform-unicode-sets-regex": "^8.0.1",
+    "esbuild": "^0.28.2"
+  },
+  "overrides": {
+    "regenerate-unicode-properties": "10.2.2"
+  }
+}

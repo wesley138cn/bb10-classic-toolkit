@@ -1,0 +1,5 @@
+#!/bin/sh
+export LC_CTYPE=en_US.UTF-8
+export PYTHONIOENCODING=utf-8
+export LD_LIBRARY_PATH=/base/lib:/base/usr/lib
+exec /base/usr/bin/python3.2 /accounts/1000/shared/misc/berrycloud/berrycloud.py "$@"

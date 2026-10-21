@@ -1,0 +1,27 @@
+name: Source checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.3'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 scripts/check-source.py
+      - run: python3 -m unittest discover -s berrycloud -p 'test_*.py'
+      - run: sh term49/test-host.sh
+      - run: python3 term49/fetch-deps.py --pinyin-only
+      - run: sh term49/test-host.sh --ime
+      - run: npm ci --prefix pi-classic/package --ignore-scripts --omit=optional
+      - run: npm ci --prefix pi-classic/build-tools --ignore-scripts
+      - run: node pi-classic/transform-regex.cjs
+      - run: node pi-classic/test-unicode.mjs
+      - run: node pi-classic/test-curl-fetch.mjs
+      - run: node pi-classic/test-guard.mjs
+      - run: node pi-classic/bundle.cjs

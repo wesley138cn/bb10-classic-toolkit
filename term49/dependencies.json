@@ -1,0 +1,18 @@
+{
+  "term49": {
+    "url": "https://codeload.github.com/BerryFarm/Term49/zip/a02f06232c3af9781d4a7f70ed5939e7447825f7",
+    "sha256": "b306bf7f072fe61372fc881f66d9005fd563ab738c8dfef6c82c1885a751026b",
+    "filename": "term49.zip",
+    "root": "Term49-a02f06232c3af9781d4a7f70ed5939e7447825f7"
+  },
+  "pinyin": {
+    "url": "https://deb.debian.org/debian/pool/main/libg/libgooglepinyin/libgooglepinyin_0.1.2.orig.tar.bz2",
+    "sha256": "1a339ae45721a60b9fadd15e43c34b9bb27af3bb999c00ed0d88b4084cfd0637",
+    "filename": "libgooglepinyin.tar.bz2"
+  },
+  "font": {
+    "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/f8d157532fbfaeda587e826d4cd5b21a49186f7c/Sans/Mono/NotoSansMonoCJKsc-Regular.otf",
+    "sha256": "ec04cc376b34887cedbdf84074e2e226ed2761eeabdcb9173fc1dd7bfd153ef7",
+    "filename": "NotoSansMonoCJKsc-Regular.otf"
+  }
+}

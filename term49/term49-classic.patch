@@ -1,0 +1,1473 @@
+--- a/src/buffer.c
++++ b/src/buffer.c
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ /*
+  * Copyright (c) 2013 Todd Mortimer
+  *
+@@ -15,12 +16,14 @@
+  */
+ 
+ #include <strings.h>
++#include <unicode/uchar.h>
+ 
+ #include "SDL.h"
+ #include "SDL_ttf.h"
+ #include "terminal.h"
+ 
+ #include "buffer.h"
++#include "scrollback.h"
+ 
+ static uint32_t saved_buf_p;
+ static saved_buf_t* saved_buf;
+@@ -102,9 +105,11 @@
+ }
+ 
+ void buf_uninit(){
++  history_live();
+   int i, n;
+   for(n = 0; n < NUM_BUFFERS; ++n){
+     buf = &screens[n];
++    history_destroy(buf);
+     for(i=0; i< TEXT_BUFFER_SIZE + 1;++i){
+       if(buf->text[i] != NULL){
+         buf_erase_line(buf->text[i], (size_t)MAX_COLS);
+@@ -192,6 +197,33 @@
+   }
+ }
+ 
++/* Local CJK extension. Terminal columns remain half-width units. */
++int buf_char_width(UChar c) {
++  if (!c) return 0;
++  int width = u_getIntPropertyValue(c, UCHAR_EAST_ASIAN_WIDTH);
++  return width == U_EA_WIDE || width == U_EA_FULLWIDTH ? 2 : 1;
++}
++
++void buf_erase_cells(struct screenchar *line, int start, int count) {
++  if (start < 0) { count += start; start = 0; }
++  if (start >= cols || count <= 0) return;
++  int end = start + count;
++  if (end > cols) end = cols;
++  if (start > 0 && line[start].c == 0 && buf_char_width(line[start-1].c) == 2) --start;
++  if (end < cols && buf_char_width(line[end-1].c) == 2 && line[end].c == 0) ++end;
++  buf_erase_line(line + start, (size_t)(end-start));
++}
++
++void buf_repair_wide(struct screenchar *line, int count) {
++  int i;
++  for (i=0; i<count; ++i) {
++    if (buf_char_width(line[i].c) == 2) {
++      if (i+1 < count && line[i+1].c == 0) ++i;
++      else buf_erase_line(line+i, 1);
++    } else if (line[i].c == 0) buf_erase_line(line+i, 1);
++  }
++}
++
+ void buf_erase_lines(int start_line, int num){
+ 	int i;
+ 	for(i = 0; i < num; ++i){
+@@ -273,6 +305,12 @@
+ void buf_check_screen_scroll(){
+ 
+   struct screenchar* tmp;
++
++  /* Capture outgoing visible lines before internal buffer compaction. */
++  if(buf->line-buf->top_line >= rows){
++    int end=buf->line-(rows-1),i;
++    for(i=buf->top_line;i<end && i<TEXT_BUFFER_SIZE;i++)history_append(buf->text[i],cols);
++  }
+ 
+   // check if we are out of buffer
+   if(buf->line >= TEXT_BUFFER_SIZE - 1) {
+@@ -351,6 +389,7 @@
+ }
+ 
+ void buf_scroll_scroll_region(){
++  if(sr.top==1 && sr.bottom==rows)history_append(buf->text[buf->top_line],cols);
+   struct screenchar* tmp = buf->text[buf->top_line + (sr.top - 1)];
+   int j;
+   for(j=sr.top; j<sr.bottom; ++j){
+@@ -426,89 +465,47 @@
+ /* pass 0 to shift following characters or
+  * pass 1 to shift preceding characters
+  */
+-void buf_delete_character(char shift_preceding){
+-
+-  /* start by blanking out the char under the cursor */
+-  buf_erase_line(&buf->text[buf->line][buf->col], 1);
+-  /* then shift */
+-  struct screenchar sc = buf->text[buf->line][buf->col];
++static void buf_shift_characters(int n, int insert, int preceding) {
++  int at = buf->col;
++  if (at < 0 || at >= cols || n <= 0) return;
++  int available = preceding ? at+1 : cols-at;
++  if (n > available) n = available;
++  struct screenchar *line = buf->text[buf->line];
+   int i;
+-  if(shift_preceding){
+-    for(i = buf->col; i > 0; --i){
+-      buf->text[buf->line][i] = buf->text[buf->line][i-1];
+-    }
+-    buf->text[buf->line][0] = sc;
++  if (!preceding && !insert) {
++    buf_erase_cells(line, at, n);
++    memmove(line+at, line+at+n, (cols-at-n)*sizeof(*line));
++    memset(line+cols-n, 0, n*sizeof(*line));
++    buf_erase_line(line+cols-n, n);
++  } else if (!preceding && insert) {
++    if (line[at].c == 0) buf_erase_cells(line, at, 1);
++    buf_erase_cells(line, cols-n, n);
++    memmove(line+at+n, line+at, (cols-at-n)*sizeof(*line));
++    memset(line+at, 0, n*sizeof(*line));
++    buf_erase_line(line+at, n);
++  } else if (preceding && !insert) {
++    buf_erase_cells(line, at-n+1, n);
++    memmove(line+n, line, (at-n+1)*sizeof(*line));
++    memset(line, 0, n*sizeof(*line));
++    buf_erase_line(line, n);
+   } else {
+-    for(i = buf->col; i < cols - 1; ++i){
+-      buf->text[buf->line][i] = buf->text[buf->line][i+1];
+-    }
+-    buf->text[buf->line][cols-1] = sc;
+-  }
+-}
+-
+-void buf_delete_character_following(int n){
+-  /* sanity check n */
+-  n = n > cols - buf->col ? cols - buf->col : n;
+-  int i;
+-  for(i = 0; i < n; ++i){
+-    buf_delete_character(0);
+-  }
+-}
+-
+-void buf_delete_character_preceding(int n){
+-  /* sanity check n */
+-  n = n > buf->col + 1 ? buf->col + 1 : n;
+-  int i;
+-  for(i = 0; i < n; ++i){
+-    buf_delete_character(1);
+-  }
+-}
+-
+-
+-/* pass 0 to shift following characters or
+- * pass 1 to shift preceding characters
+- */
+-void buf_insert_character(char shift_preceding){
+-
+-  /* shift */
+-  struct screenchar sc;
+-  int i;
+-  if(shift_preceding){
+-    sc = buf->text[buf->line][0];
+-    for(i = 0; i < buf->col; ++i){
+-      buf->text[buf->line][i] = buf->text[buf->line][i+1];
+-    }
+-    buf->text[buf->line][buf->col] = sc;
+-  } else {
+-    sc = buf->text[buf->line][cols-1];
+-    for(i = cols-1; i > buf->col; --i){
+-      buf->text[buf->line][i] = buf->text[buf->line][i-1];
+-    }
+-    buf->text[buf->line][buf->col] = sc;
+-  }
+-  /* end by blanking out the char under the cursor */
+-  buf_erase_line(&buf->text[buf->line][buf->col], 1);
+-}
+-
+-void buf_insert_character_following(int n){
+-  /* sanity check n */
+-  n = n > cols - buf->col ? cols - buf->col : n;
+-  int i;
+-  for(i = 0; i < n; ++i){
+-    buf_insert_character(0);
+-  }
+-}
+-
+-void buf_insert_character_preceding(int n){
+-  /* sanity check n */
+-  n = n > buf->col + 1 ? buf->col + 1 : n;
+-  int i;
+-  for(i = 0; i < n; ++i){
+-    buf_insert_character(1);
+-  }
+-}
++    if (buf_char_width(line[at].c) == 2) buf_erase_cells(line, at, 1);
++    buf_erase_cells(line, 0, n);
++    memmove(line, line+n, (at-n+1)*sizeof(*line));
++    memset(line+at-n+1, 0, n*sizeof(*line));
++    buf_erase_line(line+at-n+1, n);
++  }
++  buf_repair_wide(line, cols);
++}
++void buf_delete_character(char preceding) { buf_shift_characters(1,0,preceding); }
++void buf_delete_character_following(int n) { buf_shift_characters(n,0,0); }
++void buf_delete_character_preceding(int n) { buf_shift_characters(n,0,1); }
++void buf_insert_character(char preceding) { buf_shift_characters(1,1,preceding); }
++void buf_insert_character_following(int n) { buf_shift_characters(n,1,0); }
++void buf_insert_character_preceding(int n) { buf_shift_characters(n,1,1); }
+ 
+ void buf_clear_all_renders(){
++  history_invalidate();
+   int i = 0;
+   int j = 0;
+   for(i=0; i<TEXT_BUFFER_SIZE; ++i){
+@@ -519,12 +516,13 @@
+ }
+ 
+ void buf_reset_text_buffer(buf_t* toclear){
++  history_clear(toclear);
+   int i = 0;
+   int j = 0;
+   for(i=0; i<TEXT_BUFFER_SIZE; ++i){
+     for(j=0; j<MAX_COLS;++j){
+       buf_free_char(&(toclear->text[i][j]));
+-      (toclear->text[i][j]).c = 0;
++      (toclear->text[i][j]).c = ' ';
+       (toclear->text[i][j]).style = default_text_style;
+     }
+   }
+@@ -537,6 +535,7 @@
+ }
+ 
+ void buf_save_text(){
++  history_live();
+   saved_buf_p = (saved_buf_p + 1) % NUM_BUFFERS;
+   /* clear the new buffer */
+   buf = &(screens[saved_buf_p]);
+@@ -544,6 +543,7 @@
+ }
+ 
+ void buf_restore_text(){
++  history_live();
+   /* clear the old buffer */
+   buf_reset_text_buffer(buf);
+   /* and swap */
+--- a/src/buffer.h
++++ b/src/buffer.h
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ /*
+  * Copyright (c) 2013 Todd Mortimer
+  *
+@@ -34,7 +35,9 @@
+   SDL_Surface* surface;
+ };
+ 
++struct history;
+ struct text {
++  struct history *history;
+   struct screenchar** text;
+   int line;
+   int col;
+@@ -68,7 +71,12 @@
+ void buf_erase_line(struct screenchar* sc, size_t n);
+ void buf_erase_lines(int start_line, int num);
+ void buf_free_char(struct screenchar* sc);
++/* Local CJK extension: c==0 marks the second cell of a wide glyph. */
++int buf_char_width(UChar c);
++void buf_erase_cells(struct screenchar *line, int start, int count);
++void buf_repair_wide(struct screenchar *line, int count);
+ void buf_check_screen_scroll();
++void buf_scroll_scroll_region();
+ void buf_check_screen_rscroll();
+ void buf_increment_line();
+ void buf_decrement_line();
+--- a/src/ecma48.c
++++ b/src/ecma48.c
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ /*
+  * Copyright (c) 2013 Todd Mortimer
+  *
+@@ -27,6 +28,7 @@
+ 
+ #include "terminal.h"
+ #include "buffer.h"
++#include "scrollback.h"
+ #include "io.h"
+ #include "colors.h"
+ 
+@@ -221,39 +223,27 @@
+ }
+ 
+ void ecma48_add_char(UChar c){
+-
+-  if(writing_buffer == BUFFER_NORMAL){
+-    // check if we are being asked to write beyond the screen
+-    // if so, the program is not handling wrapping, so we wrap
+-  	if(buf->col == cols) {
+-			if(autowrap){ // wrap
+-				buf_increment_line();
+-				buf->col = 0;
+-			} else { // no autowrap means no wrapping
+-				// overwrite last char
+-				buf->col = cols -1;
+-			}
+-		}
+-  	if(modes.IRM){
+-  	  /* INSERT Mode - insert a blank before doing the usual thing */
+-  	  buf_insert_character(0);
+-  	}
+-    struct screenchar *sc = &(buf->text[buf->line][buf->col++]);
+-
+-    /* free old char */
+-    buf_free_char(sc);
+-    /* write new one */
+-    sc->c = c;
+-    sc->style = buf->current_style;
+-    if(buf->current_style.reverse){
+-      /* reverse the fg and bg */
+-      SDL_Color temp = sc->style.fg_color;
+-      sc->style.fg_color = sc->style.bg_color;
+-      sc->style.bg_color = temp;
+-    }
+-    /* cache for REP */
+-    last_char = c;
+-  } /* else { BUFFER_OSC, etc. -> ignore for now } */
++  if (writing_buffer != BUFFER_NORMAL || c == 0) return;
++  int width = buf_char_width(c);
++  if (cols < width) { c = '?'; width = 1; }
++  if (buf->col + width > cols) {
++    if (autowrap) {
++      if (buf->col < cols) buf_erase_cells(buf->text[buf->line],buf->col,cols-buf->col);
++      buf_increment_line(); buf->col=0;
++    } else buf->col=cols-width;
++  }
++  if (modes.IRM) buf_insert_character_following(width);
++  struct screenchar *line=buf->text[buf->line];
++  buf_erase_cells(line,buf->col,width);
++  struct screenchar *sc=line+buf->col;
++  sc->c=c;sc->style=buf->current_style;
++  if (buf->current_style.reverse) {
++    SDL_Color temp=sc->style.fg_color;
++    sc->style.fg_color=sc->style.bg_color;sc->style.bg_color=temp;
++  }
++  if (width==2) { sc[1].c=0;sc[1].style=sc->style; }
++  buf->col+=width;
++  last_char=c;
+ }
+ 
+ int ecma48_RETURN(UChar* tbuf){
+@@ -1903,13 +1893,13 @@
+   int Pn = escape_args.args[0][0] != '\0' ? (int)strtol(escape_args.args[0], NULL, 10) : 0;
+   switch (Pn) {
+     case 0: // from cursor to end of screen
+-      buf_erase_line(&buf->text[buf->line][buf->col], (cols-buf->col));
++      buf_erase_cells(buf->text[buf->line], buf->col, cols-buf->col);
+       for(i=(buf->line-buf->top_line + 1); i < rows; ++i){
+         buf_erase_line(buf->text[buf->top_line + i], cols );
+       }
+       break;
+     case 1: // from top of screen to cursor
+-      buf_erase_line(buf->text[buf->line], (buf->col+1));
++      buf_erase_cells(buf->text[buf->line], 0, buf->col+1);
+       for(i= 0; i < (buf->line-buf->top_line); ++i){
+         buf_erase_line(buf->text[buf->top_line + i], cols);
+       }
+@@ -1918,7 +1908,7 @@
+       ecma48_clear_display();
+       break;
+     case 3: // Erase saved lines (xterm)
+-      // FIXME: Implment
++      history_clear(buf);
+       break;
+   };
+   ecma48_end_control();
+@@ -1956,10 +1946,10 @@
+   int Pn = escape_args.args[0][0] != '\0' ? (int)strtol(escape_args.args[0], NULL, 10) : 0;
+   switch (Pn) {
+     case 0: // from cursor to end of line
+-      buf_erase_line(&buf->text[buf->line][buf->col], (cols-buf->col));
++      buf_erase_cells(buf->text[buf->line], buf->col, cols-buf->col);
+       break;
+     case 1: // from start of line to cursor
+-      buf_erase_line(buf->text[buf->line], (buf->col+1));
++      buf_erase_cells(buf->text[buf->line], 0, buf->col+1);
+       break;
+     case 2: // entire line
+       buf_erase_line(buf->text[buf->line], cols);
+@@ -2356,7 +2346,7 @@
+   /* Make sure not to overrun the end of the line */
+   int max = cols - buf->col;
+   Pn = Pn > max ? max : Pn;
+-  buf_erase_line(&buf->text[buf->line][buf->col], Pn);
++  buf_erase_cells(buf->text[buf->line], buf->col, Pn);
+   ecma48_end_control();
+ }
+ 
+--- /dev/null
++++ b/src/ime_engine.h
+@@ -0,0 +1,34 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
++/* Term49 offline Pinyin adapter. Apache-2.0. */
++#ifndef TERM49_IME_ENGINE_H
++#define TERM49_IME_ENGINE_H
++#include <stddef.h>
++#include <stdint.h>
++#ifdef __cplusplus
++extern "C" {
++#endif
++#define IME_PAGE 3
++#define IME_MAX_INPUT 64
++#define IME_MAX_TEXT 128
++enum { IME_BACKSPACE=0x10001, IME_ESCAPE, IME_ENTER, IME_LEFT, IME_RIGHT, IME_UP, IME_DOWN, IME_TAB };
++typedef void (*ime_commit_fn)(const uint16_t *, size_t);
++int ime_init(const char *dictionary, const char *user_dictionary, ime_commit_fn commit);
++void ime_close(void);
++int ime_ready(void);
++int ime_enabled(void);
++void ime_toggle(void);
++void ime_cancel(void);
++int ime_key(int key, int shortcut_modifier);
++int ime_choose_visible(int index);
++void ime_page(int direction);
++const char *ime_spelling(void);
++size_t ime_candidate_count(void);
++size_t ime_page_number(void);
++int ime_selected(void);
++int ime_candidate(int visible_index, uint16_t *out, size_t capacity);
++int ime_fixed(uint16_t *out, size_t capacity);
++const char *ime_notice(void);
++#ifdef __cplusplus
++}
++#endif
++#endif
+--- a/src/main.c
++++ b/src/main.c
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ /*
+  * Copyright (c) 2013 Todd Mortimer
+  *
+@@ -39,8 +40,12 @@
+ #include "buffer.h"
+ #include "io.h"
+ #include "colors.h"
++#include "ime_engine.h"
++#include "scrollback.h"
++#include <assert.h>
+ 
+ static int exit_application = 0;
++static int cjk_render_test = 0;
+ 
+ static char slave_ptyname[L_ctermid];
+ 
+@@ -65,6 +70,9 @@
+ static int vmodifiers = 0;
+ 
+ static TTF_Font* font;
++static TTF_Font* cjk_font;
++static int font_baseline;
++#define LATIN_FONT_PATH "/usr/fonts/font_repository/monotype/andalemo.ttf"
+ static int text_width;
+ static int text_height;
+ static int text_height_padding;
+@@ -89,6 +97,7 @@
+ static pid_t child_pid = -1;
+ 
+ static char virtualkeyboard_visible = 0;
++static void scroll_render_controls(void);
+ static char key_repeat_done = 0;
+ 
+ static SDL_mutex *input_mutex = NULL;
+@@ -130,6 +139,7 @@
+ 	return 0;
+ }
+ 
++static int ime_translate_key(int key);
+ int send_metamode_keystrokes(const char* keystrokes){
+ 
+ 	UChar* ukeystrokes;
+@@ -143,6 +153,7 @@
+ 		/* if the keystrokes for this key match a terminfo pattern,
+ 		 * send the appropriate sequence instead of the literal string */
+ 		if(terminfo_key){
++            if(ime_key(ime_translate_key(terminfo_key),0))return 1;
+ 			ukeystrokes_len = ecma48_parse_control_codes(terminfo_key, 0, terminfo_keystrokes);
+ 			/* and write out to the tty whatever the keys were */
+ 			io_write_master(terminfo_keystrokes, ukeystrokes_len);
+@@ -150,6 +161,12 @@
+ 		}
+ 		// else
+ 		keystrokes_len = strlen(keystrokes);
++        if(ime_enabled() && keystrokes_len==1){
++            int key=(unsigned char)keystrokes[0];
++            if(key==27)key=IME_ESCAPE;
++            if(ime_key(key,0))return 1;
++        }
++        if(*ime_spelling())ime_key(IME_ENTER,0);
+ 		/* libconfig will return ascii strings, but we can put utf8 in there too */
+ 		ukeystrokes = (UChar*)calloc(keystrokes_len, sizeof(UChar));
+ 		ukeystrokes_len = io_read_utf8_string(keystrokes, keystrokes_len, ukeystrokes);
+@@ -251,6 +268,28 @@
+ 	return NULL;
+ }
+ 
++/* Resolve face independently from the terminal's column width. */
++static SDL_Surface *render_font_cell(const UChar *str, SDL_Color fg, SDL_Color bg) {
++    int width = buf_char_width(str[0]) * advance;
++    if (width < advance) width = advance;
++    TTF_Font *face = (buf_char_width(str[0]) == 2 || !TTF_GlyphIsProvided(font, str[0]))
++                    ? cjk_font : font;
++    TTF_SetFontStyle(face, TTF_GetFontStyle(font));
++    SDL_Surface *glyph = TTF_RenderUNICODE_Shaded(face, str, fg, bg);
++    if (!glyph) return NULL;
++    SDL_Surface *cell = SDL_CreateRGBSurface(SDL_SWSURFACE, width, text_height, 32,
++                                            0x00ff0000, 0x0000ff00, 0x000000ff, 0);
++    if (!cell) { SDL_FreeSurface(glyph); return NULL; }
++    SDL_FillRect(cell, NULL, SDL_MapRGB(cell->format, bg.r, bg.g, bg.b));
++    SDL_Rect dest;
++    dest.x = (width - glyph->w) / 2;
++    dest.y = font_baseline - TTF_FontAscent(face);
++    dest.w = glyph->w; dest.h = glyph->h;
++    SDL_BlitSurface(glyph, NULL, cell, &dest);
++    SDL_FreeSurface(glyph);
++    return cell;
++}
++
+ int font_init(int font_size){
+ 	if(font_size < MIN_FONT_SIZE){
+ 		fprintf(stderr, "Refusing to set font size to %d - too small\n",font_size);
+@@ -258,24 +297,42 @@
+ 		font_size = preferences_guess_best_font_size(prefs, default_font_columns);
+ 	}
+ 
+-	/* Load the font */
+-	font = TTF_OpenFont(prefs->font_path, font_size);
+-	if ( font == NULL ) {
+-		/* try opening the default stuff */
+-		fprintf(stderr, "Couldn't load %d pt font from %s: %s\n", font_size, prefs->font_path, SDL_GetError());
+-		font = TTF_OpenFont(DEFAULT_FONT_PATH, DEFAULT_FONT_SIZE);
+-		if(font == NULL){
+-			fprintf(stderr, "Could not open default font %s: %s\n", DEFAULT_FONT_PATH, SDL_GetError());
+-			return TERM_FAILURE;
+-		}
+-	}
+-	PRINT(stderr, "Font is Fixed Width: %d\n", TTF_FontFaceIsFixedWidth(font));
+-
+-	/* Set default options */
+-	TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
+-	TTF_SetFontOutline(font, 0);
+-	TTF_SetFontKerning(font, 0);
+-	TTF_SetFontHinting(font, TTF_HINTING_NORMAL);
++
++    /* Latin retains the signed terminal's original face and advance. */
++    font = TTF_OpenFont(LATIN_FONT_PATH, font_size);
++    if (!font) {
++        fprintf(stderr, "Cannot open original Latin font: %s\n", TTF_GetError());
++        return TERM_FAILURE;
++    }
++    int minx, maxx, miny, maxy;
++    if (TTF_GlyphMetrics(font, 'X', &minx, &maxx, &miny, &maxy, &advance)) {
++        TTF_CloseFont(font); font = NULL;
++        return TERM_FAILURE;
++    }
++    /* A fullwidth em is exactly two Latin columns, without stretching. */
++    cjk_font = TTF_OpenFont(prefs->font_path, 2 * advance);
++    if (!cjk_font) {
++        fprintf(stderr, "Cannot open CJK font: %s\n", TTF_GetError());
++        TTF_CloseFont(font); font = NULL;
++        return TERM_FAILURE;
++    }
++    TTF_Font *faces[2] = {font, cjk_font};
++    for (int i=0; i<2; ++i) {
++        TTF_SetFontStyle(faces[i], TTF_STYLE_NORMAL);
++        TTF_SetFontOutline(faces[i], 0);
++        TTF_SetFontKerning(faces[i], 0);
++        TTF_SetFontHinting(faces[i], TTF_HINTING_NORMAL);
++    }
++    text_width = advance;
++    font_baseline = TTF_FontAscent(font);
++    if (TTF_FontAscent(cjk_font) > font_baseline) font_baseline = TTF_FontAscent(cjk_font);
++    int descent = TTF_FontDescent(font);
++    if (TTF_FontDescent(cjk_font) < descent) descent = TTF_FontDescent(cjk_font);
++    text_height = font_baseline - descent;
++    text_height_padding = 0;
++    fprintf(stderr, "DUAL_FONT latin=%s cjk=%s cell=%d wide=%d line=%d\n",
++            TTF_FontFaceFamilyName(font), TTF_FontFaceFamilyName(cjk_font),
++            advance, 2*advance, text_height);
+ 
+ 	/* get default colour settings from prefs struct*/
+ 	default_text_color.r = (Uint8)prefs->text_color[0];
+@@ -295,7 +352,7 @@
+ 
+ 	/* initialize special characters */
+ 	UChar str[2] = {' ', NULL};
+-	blank_surface = TTF_RenderUNICODE_Shaded(font, str, default_text_color, default_bg_color);
++	blank_surface = render_font_cell(str, default_text_color, default_bg_color);
+ 	if (blank_surface == NULL){
+ 		PRINT(stderr, "Couldn't render blank surface: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+@@ -304,42 +361,42 @@
+ 	blank_sc.c = ' ';
+ 	blank_sc.style = default_text_style;
+ 	blank_sc.surface = blank_surface;
+-	flash_surface = TTF_RenderUNICODE_Shaded(font, str, default_bg_color, default_text_color);
++	flash_surface = render_font_cell(str, default_bg_color, default_text_color);
+ 	if (flash_surface == NULL){
+ 		PRINT(stderr, "Couldn't render flash surface: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+ 	}
+ 
+ 	str[0] = 'A';
+-	alt_key_indicator = TTF_RenderUNICODE_Shaded(font, str, metamode_cursor_fg, metamode_cursor_bg);
++	alt_key_indicator = render_font_cell(str, metamode_cursor_fg, metamode_cursor_bg);
+ 	if (alt_key_indicator == NULL){
+ 		PRINT(stderr, "Couldn't render alt_key_indicator surface: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+ 	}
+ 
+ 	str[0] = 'C';
+-	ctrl_key_indicator = TTF_RenderUNICODE_Shaded(font, str, metamode_cursor_fg, metamode_cursor_bg);
++	ctrl_key_indicator = render_font_cell(str, metamode_cursor_fg, metamode_cursor_bg);
+ 	if (ctrl_key_indicator == NULL){
+ 		PRINT(stderr, "Couldn't render ctrl_key_indicator surface: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+ 	}
+ 
+ 	str[0] = 0x2191;
+-	shift_key_indicator = TTF_RenderUNICODE_Shaded(font, str, metamode_cursor_fg, metamode_cursor_bg);
++	shift_key_indicator = render_font_cell(str, metamode_cursor_fg, metamode_cursor_bg);
+ 	if (shift_key_indicator == NULL){
+ 		PRINT(stderr, "Couldn't render shift_key_indicator surface: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+ 	}
+ 
+ 	str[0] = 'a';
+-	altsym_indicator = TTF_RenderUNICODE_Shaded(font, str, metamode_cursor_fg, metamode_cursor_bg);
++	altsym_indicator = render_font_cell(str, metamode_cursor_fg, metamode_cursor_bg);
+ 	if (shift_key_indicator == NULL){
+ 		PRINT(stderr, "Couldn't render altsym_indicator surface: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+ 	}
+ 
+ 	str[0] = 'M';
+-	metamode_cursor = TTF_RenderUNICODE_Shaded(font, str, metamode_cursor_fg, metamode_cursor_bg);
++	metamode_cursor = render_font_cell(str, metamode_cursor_fg, metamode_cursor_bg);
+ 	if (metamode_cursor == NULL){
+ 		PRINT(stderr, "Couldn't render metamode_cursor surface: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+@@ -347,24 +404,12 @@
+ 
+ 	/* Initialize the cursor */
+ 	UChar cursorstr[2] = {' ', NULL};
+-	cursor = TTF_RenderUNICODE_Shaded(font, cursorstr, default_bg_color, default_text_color);
++	cursor = render_font_cell(cursorstr, default_bg_color, default_text_color);
+ 	if (cursor == NULL){
+ 		PRINT(stderr, "Couldn't render cursor char: %s\n", TTF_GetError());
+ 		return TERM_FAILURE;
+ 	}
+ 
+-	/* Get the size of the font */
+-	int minx, maxx, miny, maxy;
+-	if(TTF_GlyphMetrics(font, (Uint16)'X', &minx, &maxx, &miny, &maxy, &advance) != 0){
+-		PRINT(stderr, "Could not get Glyph Metrics: %s\n", TTF_GetError());
+-		return TERM_FAILURE;
+-	}
+-
+-	text_width = advance;
+-	text_height = maxy - miny;
+-	text_height_padding = TTF_FontLineSkip(font) - text_height;
+-	text_height += text_height_padding;
+-	PRINT(stderr, "Character h: %d w:%d (h padding: %d) advance: %d\n", text_height, text_width, text_height_padding, advance);
+ 
+ 	return TERM_SUCCESS;
+ }
+@@ -377,10 +422,110 @@
+ 	SDL_FreeSurface(ctrl_key_indicator);
+ 	SDL_FreeSurface(alt_key_indicator);
+ 	SDL_FreeSurface(shift_key_indicator);
++	SDL_FreeSurface(altsym_indicator);
+ 	SDL_FreeSurface(cursor);
+ 	if(font != NULL){
+ 		TTF_CloseFont(font);
+-	}
++		font = NULL;
++	}
++	if (cjk_font) { TTF_CloseFont(cjk_font); cjk_font = NULL; }
++}
++
++/* Integrated input panel; composed syllables never enter the child PTY. */
++static int ime_area_height;
++static void ime_send_text(const uint16_t *s, size_t n) {
++    /* Existing terminal converter has a 40-byte buffer. Preserve long commits. */
++    while(n){size_t part=n>8?8:n;
++        if(part<n && s[part-1]>=0xd800 && s[part-1]<=0xdbff)--part;
++        io_write_master((const UChar *)s,part);s+=part;n-=part;
++    }
++}
++static void ime_resize(void) {
++    if(!screen)return;
++    setup_screen_size(screen->w,screen->h-(virtualkeyboard_visible?get_virtualkeyboard_height():0));
++}
++static void ime_switch_mode(void) {
++    ime_toggle();vmodifiers=0;altsym_lock=0;key_repeat_done=0;
++    ime_resize();
++}
++static int ime_translate_key(int key) {
++    switch(key){
++    case KEYCODE_BACKSPACE:return IME_BACKSPACE;
++    case KEYCODE_ESCAPE:return IME_ESCAPE;
++    case KEYCODE_RETURN:return IME_ENTER;
++    case KEYCODE_LEFT:return IME_LEFT;
++    case KEYCODE_RIGHT:return IME_RIGHT;
++    case KEYCODE_UP:return IME_UP;
++    case KEYCODE_DOWN:return IME_DOWN;
++    case KEYCODE_TAB:return IME_TAB;
++    default:return key;
++    }
++}
++static void ime_draw_line(const uint16_t *s,int x,int y,int width,SDL_Color fg,SDL_Color bg) {
++    SDL_Rect r={x,y,width,text_height};
++    SDL_FillRect(screen,&r,SDL_MapRGB(screen->format,bg.r,bg.g,bg.b));
++    TTF_SetFontStyle(font,TTF_STYLE_NORMAL);
++    int end=x+width;
++    for(size_t i=0;s[i];i++) {
++        int w=buf_char_width(s[i])*advance;if(w<advance)w=advance;
++        if(x+w>end)break;
++        if(s[i+1] && x+w+advance>end){UChar ell[2]={0x2026,0};SDL_Surface *g=render_font_cell(ell,fg,bg);if(g){SDL_Rect dst={x,y,g->w,g->h};SDL_BlitSurface(g,NULL,screen,&dst);SDL_FreeSurface(g);}break;}
++        UChar ch[2]={s[i],0};SDL_Surface *g=render_font_cell(ch,fg,bg);
++        if(g){SDL_Rect dst={x,y,g->w,g->h};SDL_BlitSurface(g,NULL,screen,&dst);SDL_FreeSurface(g);}
++        x+=w;
++    }
++}
++static void ime_draw_utf8(const char *s,int x,int y,int width,SDL_Color fg,SDL_Color bg) {
++    UChar str[512]={0};size_t len=strlen(s);if(len>500)len=500;
++    int n=io_read_utf8_string(s,len,str);str[n]=0;ime_draw_line(str,x,y,width,fg,bg);
++}
++static void ime_render_panel(void) {
++    if(history_active()){
++        SDL_Color fg={104,222,177,0},bg={27,35,42,0};
++        int y=rows*text_height;char label[160];
++        SDL_Rect r={0,y,screen->w,screen->h-y};SDL_FillRect(screen,&r,SDL_MapRGB(screen->format,bg.r,bg.g,bg.b));
++        snprintf(label,sizeof(label),"回看 %d/%d  点下方按钮翻页/返回",history_position()+1,history_total());
++        ime_draw_utf8(label,0,y,screen->w,fg,bg);return;
++    }
++    if(!ime_ready() || current_symmenu || !ime_area_height)return;
++    SDL_Color fg={235,239,240,0},bg={27,35,42,0},accent={104,222,177,0},sel={48,77,86,0};
++    int y=rows*text_height;
++    SDL_Rect fill={0,y,screen->w,ime_area_height};SDL_FillRect(screen,&fill,SDL_MapRGB(screen->format,bg.r,bg.g,bg.b));
++    if(!ime_enabled()){
++        ime_draw_utf8("[EN/中] Shift+Space  对话回看 v2",0,y,screen->w,accent,bg);return;
++    }
++    const char *py=ime_spelling();int visible=cols-22;if(visible<8)visible=8;
++    if(strlen(py)>(size_t)visible)py+=strlen(py)-visible;
++    char header[256];snprintf(header,sizeof(header),"[中/EN] %s  %lu/%lu",py,
++        (unsigned long)ime_page_number()+1,(unsigned long)(ime_candidate_count()?(ime_candidate_count()+IME_PAGE-1)/IME_PAGE:1));
++    ime_draw_utf8(header,0,y,screen->w,accent,bg);
++    if(!*ime_spelling()){
++        ime_draw_utf8("输入拼音，空格选字；触摸候选也可选字",0,y+text_height,screen->w,fg,bg);
++        ime_draw_utf8("左右翻页，上下选择，退格修改",0,y+2*text_height,screen->w,fg,bg);
++        ime_draw_utf8("回车保留拼音；再按回车才发送",0,y+3*text_height,screen->w,fg,bg);
++    }else{
++        for(int i=0;i<IME_PAGE;i++) {
++            uint16_t line[IME_MAX_TEXT+4]={0},candidate[IME_MAX_TEXT]={0};line[0]='1'+i;line[1]=' ';line[2]=' ';
++            if(ime_candidate(i,candidate,IME_MAX_TEXT))memcpy(line+3,candidate,sizeof(candidate));
++            ime_draw_line(line,0,y+(i+1)*text_height,screen->w,fg,i==ime_selected()?sel:bg);
++        }
++    }
++    if(*ime_notice())ime_draw_utf8(ime_notice(),0,y+4*text_height,screen->w,fg,bg);
++    else ime_draw_utf8("取消        空格选字        < 上页  下页 >",0,y+4*text_height,screen->w,accent,bg);
++}
++static int ime_touch(int x,int y) {
++    if(!ime_ready()||current_symmenu||y<rows*text_height)return 0;
++    int line=(y-rows*text_height)/text_height;
++    if(line==0 && x<10*advance){ime_switch_mode();return 1;}
++    if(!ime_enabled())return 1;
++    if(line>=1&&line<=IME_PAGE){ime_choose_visible(line-1);return 1;}
++    if(line==4){
++        if(x<10*advance)ime_cancel();
++        else if(x<27*advance)ime_key(' ',0);
++        else ime_page(x<36*advance?-1:1);
++        return 1;
++    }
++    return 1;
+ }
+ 
+ void handle_activeevent(int gain, int state){
+@@ -391,6 +536,7 @@
+ }
+ 
+ void handle_mousedown(Uint16 x, Uint16 y){
++    if(ime_touch(x,y))return;
+ 	/* check for hits in the metamode_hitbox */
+ 	if((x >= prefs->metamode_hitbox->x) &&
+ 	   (x <= prefs->metamode_hitbox->x + prefs->metamode_hitbox->w) &&
+@@ -409,6 +555,110 @@
+ 	if(current_symmenu != NULL){
+ 		send_metamode_keystrokes(symkey_for_mousedown(current_symmenu, x, y));
+ 	}
++}
++
++/* Called before IME/PTY handling, after Meta double-tap recognition. */
++static int scroll_key(int key,int repeat) {
++    static int swallowed;
++    if(repeat && key==swallowed)return 1;
++    if(!repeat)swallowed=0;
++    int k=key;if(k>='A' && k<='Z')k+='a'-'A';
++    if(metamode && (k=='u'||k=='d'||k=='b')){
++        swallowed=key;
++        if(!repeat){
++            if(k=='b')history_live();else history_move(k=='u'?rows-1:1-rows);
++            metamode=0;vmodifiers=0;key_repeat_done=0;
++        }
++        return 1;
++    }
++    if(history_active()){
++        swallowed=key;
++        if(key==KEYCODE_ESCAPE || k=='b'){history_live();metamode=0;vmodifiers=0;}
++        else if(key==KEYCODE_UP)history_move(1);
++        else if(key==KEYCODE_DOWN)history_move(-1);
++        else if(k=='u')history_move(rows-1);
++        else if(k=='d')history_move(1-rows);
++        /* Ordinary typing is deliberately blocked while reading history. */
++        return 1;
++    }
++    return 0;
++}
++/* Always-visible controls. Clicks use the already working mouse-down path. */
++static int scroll_bar_y(void) { return (rows+((ime_ready()&&ime_enabled())?5:1))*text_height; }
++static int scroll_control(int x,int y) {
++    int which;
++    if(current_symmenu || y<scroll_bar_y())return 0;
++    which=x/(screen->w/3);if(which>2)which=2;
++    if(which==0)history_move(rows-1);
++    else if(which==1)history_move(1-rows);
++    else {history_live();metamode=0;vmodifiers=0;}
++    fprintf(stderr,"SCROLL_CONTROL=%d active=%d saved=%d\n",which,history_active(),history_count());
++    return 1;
++}
++static void scroll_render_controls(void) {
++    int y=scroll_bar_y(),w=screen->w/3;char older[64];
++    SDL_Color fg={240,245,247,0},bg={43,64,76,0},dim={144,157,163,0};
++    if(current_symmenu)return;
++    snprintf(older,sizeof(older),history_count()||history_active()?"[ 上翻 ]":"[ 暂无历史 ]");
++    ime_draw_utf8(older,0,y,w-2,history_count()||history_active()?fg:dim,bg);
++    ime_draw_utf8("[ 下翻 ]",w,y,w-2,history_active()?fg:dim,bg);
++    ime_draw_utf8("[ 返回输入 ]",2*w,y,screen->w-2*w,fg,bg);
++}
++static int touch_down,touch_x,touch_y,touch_last,touch_drag,touch_panel,touch_control;
++static int motion_only,motion_x,motion_y;
++static Uint32 motion_time;
++static void scroll_touch_down(int x,int y) {
++    motion_only=0;
++    touch_down=1;touch_x=x;touch_y=touch_last=y;touch_drag=0;
++    touch_control=scroll_control(x,y);
++    touch_panel=(y>=rows*text_height || current_symmenu!=NULL);
++}
++static void scroll_touch_move(int x,int y) {
++    int amount;
++    if(!touch_down || touch_panel)return;
++    if(!touch_drag){
++        if(abs(y-touch_y)<20 || abs(y-touch_y)<abs(x-touch_x))return;
++        touch_drag=1;
++    }
++    amount=(y-touch_last)/text_height;
++    if(amount){history_move(amount);touch_last+=amount*text_height;}
++}
++/* TCO sends motion-only streams, without a preceding SDL button-down.
++ * A gap starts a new gesture; its first point is only an anchor, never a tap. */
++static void scroll_motion_event(int x,int y,Uint32 now) {
++    if(touch_down){scroll_touch_move(x,y);return;}
++    if(current_symmenu || y>=rows*text_height){motion_only=0;return;}
++    if(!motion_only || (Uint32)(now-motion_time)>250){
++        motion_only=1;motion_x=x;motion_y=y;touch_last=y;touch_drag=0;
++    }else{
++        if(!touch_drag && abs(y-motion_y)>=20 && abs(y-motion_y)>=abs(x-motion_x))touch_drag=1;
++        if(touch_drag){int amount=(y-touch_last)/text_height;if(amount){history_move(amount);touch_last+=amount*text_height;}}
++    }
++    motion_time=now;
++}
++static void scroll_touch_up(int x,int y) {
++    if(!touch_down)return;
++    scroll_touch_move(x,y);
++    if(!touch_control && !touch_drag && abs(y-touch_y)<20 && abs(x-touch_x)<20){
++        if(history_active()){
++            if(touch_panel){history_live();metamode=0;vmodifiers=0;}
++        }else handle_mousedown(x,y);
++    }
++    touch_down=0;motion_only=0;
++}
++/* Shared by the real SDL event loop and the queue-level integration tests. */
++static int scroll_mouse_event(SDL_Event *e) {
++    switch(e->type){
++    case SDL_MOUSEBUTTONDOWN:
++        if(e->button.button==SDL_BUTTON_WHEELUP){history_move(3);return 1;}
++        if(e->button.button==SDL_BUTTON_WHEELDOWN){history_move(-3);return 1;}
++        scroll_touch_down(e->button.x,e->button.y);return 1;
++    case SDL_MOUSEBUTTONUP:
++        if(e->button.button==SDL_BUTTON_WHEELUP||e->button.button==SDL_BUTTON_WHEELDOWN)return 1;
++        scroll_touch_up(e->button.x,e->button.y);return 1;
++    case SDL_MOUSEMOTION:scroll_motion_event(e->motion.x,e->motion.y,SDL_GetTicks());return 1;
++    default:return 0;
++    }
+ }
+ 
+ void handle_virtualkeyboard_event(bps_event_t *event){
+@@ -561,6 +811,8 @@
+ 	//screen_get_event_property_iv(screen_event, SCREEN_PROPERTY_KEY_CAP, &cap);
+ 
+ 	if (screen_flags & KEY_DOWN) {
++        static int first_input = 1;
++        if (first_input) { fprintf(stderr,"CJK_INPUT_RECEIVED\n"); fflush(stderr); first_input=0; }
+ 		PRINT(stderr, "The '%d' key was pressed (modifiers: %d) (char %c) (alt %d)\n", (int)screen_val, modifiers, (char)screen_val, (int)screen_alt_val);
+ 		fflush(stdout);
+ 
+@@ -577,6 +829,14 @@
+ 			metamode_last = now;
+ 		}
+ 
++        if(scroll_key(screen_val,screen_flags&KEY_REPEAT))return;
++        if(screen_val==KEYCODE_SPACE && ((modifiers|vmodifiers)&KEYMOD_SHIFT)) {
++            if(!(screen_flags&KEY_REPEAT))ime_switch_mode();
++            return;
++        }
++        if(metamode && (screen_val=='i'||screen_val=='I')) {
++            metamode_toggle();ime_switch_mode();return;
++        }
+ 		/* handle sticky keys */
+ 		if(screen_val == KEYCODE_BB_SYM_KEY){
+ 			if(!(screen_flags & KEY_REPEAT)){
+@@ -620,6 +880,13 @@
+ 			}
+ 		}
+ 
++        if(ime_enabled() && !metamode && !altsym_lock && !current_symmenu) {
++            int mods=modifiers|vmodifiers;
++            int key=ime_translate_key(screen_val);
++            if((mods&KEYMOD_SHIFT) && key>='a' && key<='z')key+='A'-'a';
++            if((screen_flags&KEY_REPEAT) && key!=IME_BACKSPACE)return;
++            if(ime_key(key,mods&(KEYMOD_CTRL|KEYMOD_ALT))) {vmodifiers=0;key_repeat_done=0;return;}
++        }
+ 		/* handle key repeat to upcase / metamode */
+ 		if ((screen_flags & KEY_REPEAT) &&
+ 		    prefs->keyhold_actions &&
+@@ -680,7 +947,7 @@
+ 				if(!f && (0 == strncmp(keys, "alt_down", 8)))          { toggle_vkeymod(KEYMOD_ALT);f=1;}
+ 				if(!f && (0 == strncmp(keys, "ctrl_down", 9)))         { toggle_vkeymod(KEYMOD_CTRL);f=1;}
+ 				if(!f && (0 == strncmp(keys, "rescreen", 8)))          { rescreen(-1, -1);f=1;}
+-				if(!f && (0 == strncmp(keys, "paste_clipboard", 15)))  { io_paste_from_clipboard();f=1;}
++				if(!f && (0 == strncmp(keys, "paste_clipboard", 15)))  { if(*ime_spelling())ime_key(IME_ENTER,0);io_paste_from_clipboard();f=1;}
+ 			}
+ 			metamode_toggle();
+ 			return;
+@@ -794,9 +1061,15 @@
+ 	}
+ 
+ 	int old_rows = rows;
++    int old_top_line=buf->top_line;
+ 	int old_bottom_line = buf_bottom_line();
+-	rows = s_h / text_height;
++	ime_area_height = ((ime_ready() && ime_enabled())?6:2)*text_height;
++	rows = (s_h-ime_area_height) / text_height;
++	if(rows<2)rows=2;
+ 	cols = s_w / text_width;
++	if (cols > MAX_COLS) cols = MAX_COLS;
++	if (buf->col > cols) buf->col = cols;
++	for (int k=0; k<TEXT_BUFFER_SIZE; ++k) buf_repair_wide(buf->text[k], cols);
+ 	int diff_rows = rows - old_rows;
+ 	PRINT(stderr, "Rows: %d Cols: %d\n", rows, cols);
+ 
+@@ -820,6 +1093,8 @@
+ 		buf_erase_lines(old_bottom_line + 1, toclear);
+ 	}
+ 
++    history_resize_top(buf->top_line-old_top_line);
++
+ 	/* and reset the scroll region */
+ 	sr.top = 1;
+ 	sr.bottom = rows;
+@@ -943,6 +1218,25 @@
+ 		return TERM_FAILURE;
+ 	}
+ 
++    const char *parent_group = getenv("TERM49_PARENT_GROUP");
++    if (parent_group && parent_group[0]) {
++        SDL_SysWMinfo attach_info;
++        if (get_wm_info(&attach_info) != 1) return TERM_FAILURE;
++        if (screen_join_window_group(attach_info.window, parent_group)) {
++            fprintf(stderr,"CJK_ATTACH_FAILED group=%s error=%s\n",parent_group,strerror(errno));
++            return TERM_FAILURE;
++        }
++        int z=10, visible=1, zero[3]={0,0,0};
++        screen_set_window_property_iv(attach_info.window, SCREEN_PROPERTY_ZORDER, &z);
++        screen_set_window_property_iv(attach_info.window, SCREEN_PROPERTY_VISIBLE, &visible);
++        screen_flush_context(attach_info.context, 0);
++        int tab=screen_tab_focus(attach_info.window, zero, SCREEN_EVENT_KEYBOARD, 0);
++        int focus=-1;
++        screen_get_window_property_iv(attach_info.window, SCREEN_PROPERTY_FOCUS, &focus);
++        fprintf(stderr,"CJK_ATTACHED group=%s focus=%d tab_result=%d\n",parent_group,focus,tab);
++        fflush(stderr);
++    }
++
+ 	if(font_init(prefs->font_size) == TERM_FAILURE){
+ 		PRINT(stderr, "Couldn't initialize font\n");
+ 		TTF_Quit();
+@@ -982,6 +1276,7 @@
+ }
+ 
+ void uninit(){
++    ime_close();
+ 
+ 	buf_uninit();
+ 
+@@ -1033,15 +1328,17 @@
+ 		for(int j = 0; j < cols; ++j){
+ 			/* guard against screen rotations that push the bottom of the screen past the
+ 			 * bottom of the buffer. */
+-			sc = i+buf->top_line < TEXT_BUFFER_SIZE ? &buf->text[i+buf->top_line][j] : &blank_sc;
++			sc = history_active()?history_cell(i,j):(i+buf->top_line < TEXT_BUFFER_SIZE ? &buf->text[i+buf->top_line][j] : &blank_sc);
++            if(!sc)sc=&blank_sc;
++			if (sc->c == 0) { x += advance; continue; }
+ 			if((sc->surface == NULL) && (sc->c != 0)){
+ 				// we have added a new char, but not rendered it yet
+ 				str[0] = sc->c;
+ 				TTF_SetFontStyle(font, sc->style.style);
+ 				if(buf->inverse_video){
+-					sc->surface = TTF_RenderUNICODE_Shaded(font, str, adjust_color(sc->style.bg_color, sc->style), sc->style.fg_color);
++					sc->surface = render_font_cell(str, adjust_color(sc->style.bg_color, sc->style), sc->style.fg_color);
+ 				} else {
+-					sc->surface = TTF_RenderUNICODE_Shaded(font, str, adjust_color(sc->style.fg_color, sc->style), sc->style.bg_color);
++					sc->surface = render_font_cell(str, adjust_color(sc->style.fg_color, sc->style), sc->style.bg_color);
+ 				}
+ 				if(sc->surface == NULL){
+ 					PRINT(stderr, "Rendering failed for char %d\n", (int)sc->c);
+@@ -1071,7 +1368,7 @@
+ 		}
+ 	}
+ 
+-	if (draw_cursor){
++	if (draw_cursor && !history_active()){
+ 		// draw the cursor
+ 		/* Free the old cursor if we have one */
+ 		SDL_FreeSurface(inv_cursor);
+@@ -1084,14 +1381,15 @@
+ 			drawcols -= 1;
+ 		}
+ 
++		if (drawcols > 0 && buf->text[buf->line][drawcols].c == 0) --drawcols;
+ 		sc = &buf->text[buf->line][drawcols];
+ 		if(sc->c){
+ 			str[0] = sc->c;
+ 			TTF_SetFontStyle(font, sc->style.style);
+ 			if(buf->inverse_video){
+-				inv_cursor = TTF_RenderUNICODE_Shaded(font, str, adjust_color(sc->style.fg_color, sc->style), sc->style.bg_color);
++				inv_cursor = render_font_cell(str, adjust_color(sc->style.fg_color, sc->style), sc->style.bg_color);
+ 			} else {
+-				inv_cursor = TTF_RenderUNICODE_Shaded(font, str, adjust_color(sc->style.bg_color, sc->style), sc->style.fg_color);
++				inv_cursor = render_font_cell(str, adjust_color(sc->style.bg_color, sc->style), sc->style.fg_color);
+ 			}
+ 			if(inv_cursor == NULL){
+ 				PRINT(stderr, "Rendering failed for char %d\n", (int)sc->c);
+@@ -1172,6 +1470,8 @@
+ 		}
+ 	}
+ 
++	ime_render_panel();
++    scroll_render_controls();
+ 	SDL_Flip(screen);
+ 
+ 	if(flash){
+@@ -1268,7 +1568,7 @@
+ 			if(newpath == NULL){
+ 				fprintf(stderr, "Could not calloc new $PATH - not setting private bin dir..\n");
+ 			} else {
+-				err = snprintf(newpath, newpath_len, "PATH=%s/%s:%s\n", home, root, path);
++				err = snprintf(newpath, newpath_len, "PATH=%s/%s:%s", home, root, path);
+ 				if(err > 0){
+ 					err = putenv(strdup(newpath));
+ 					if(err < 0){
+@@ -1284,6 +1584,7 @@
+ 		/* Set LC_CTYPE=en_US.UTF-8
+ 		 * Which can be overridden in .profile */
+ 		setenv("LC_CTYPE", "en_US.UTF-8", 0);
++		if (cjk_render_test) { execl("/bin/sh", "sh", "-c", "sleep 30", (char*)0); _exit(127); }
+ 		if(execl("../app/native/root/bin/mksh", "mksh", "-l", (char*)0) == -1){
+ 			execl("/bin/sh", "sh", "-l", (char*)0);
+ 		}
+@@ -1360,8 +1661,85 @@
+ 	return 0;
+ }
+ 
++static void scroll_feed(const char *s) {
++    UChar out[2048];int n=io_read_utf8_string(s,strlen(s),out);ecma48_filter_text(out,n);
++}
++/* Drive the installed SDL library's actual TCO callback, then consume the SDL
++ * events exactly as the application does (no synthetic press for a drag). */
++extern int handleTouchScreen(int x,int y,int tap,int hold);
++static int scroll_drain_mouse(void) {
++    SDL_Event e;int count=0;
++    while(SDL_PeepEvents(&e,1,SDL_GETEVENT,SDL_MOUSEEVENTMASK)>0){assert(scroll_mouse_event(&e));count++;}
++    return count;
++}
++static void scroll_driver_test(void) {
++    SDL_Event e;int at;
++    while(SDL_PeepEvents(&e,1,SDL_GETEVENT,SDL_MOUSEEVENTMASK)>0){}
++    history_live();touch_down=motion_only=0;
++    handleTouchScreen(220,70,0,0);assert(scroll_drain_mouse()>0);assert(!history_active());
++    handleTouchScreen(220,170,0,0);assert(scroll_drain_mouse()>0);assert(history_active());at=history_position();
++    handleTouchScreen(220,300,0,0);assert(scroll_drain_mouse()>0);assert(history_position()<at);
++    /* A pause must not join unrelated touches into one huge scroll. */
++    at=history_position();scroll_motion_event(220,80,motion_time+500);assert(history_position()==at);
++    /* Buttons go through real TCO tap -> SDL down/up, even while live. */
++    handleTouchScreen(screen->w-80,scroll_bar_y()+10,1,0);assert(scroll_drain_mouse()>=2);assert(!history_active());
++    handleTouchScreen(80,scroll_bar_y()+10,1,0);assert(scroll_drain_mouse()>=2);assert(history_active());at=history_position();
++    handleTouchScreen(screen->w/2,scroll_bar_y()+10,1,0);assert(scroll_drain_mouse()>=2);assert(!history_active()||history_position()>at);
++    handleTouchScreen(screen->w-80,scroll_bar_y()+10,1,0);scroll_drain_mouse();assert(!history_active());
++    fprintf(stderr,"TCO_EVENT_TEST_OK: real SDL motion-only drag; gap reset; tap up/down/back buttons\n");
++}
++
++static void scroll_integration_test(void) {
++    int i,r=rows;char line[180];
++    buf_reset_text_buffer(buf);sr.top=1;sr.bottom=rows;
++    for(i=0;i<4300;i++){
++        snprintf(line,sizeof(line),"%04d 中文回看：你好，世界！ ABC 123\r\n",i);scroll_feed(line);
++    }
++    assert(history_count()==HISTORY_LIMIT);
++    metamode=1;assert(scroll_key('u',0));assert(history_active());assert(!metamode);
++    int at=history_position();UChar first=history_cell(0,0)->c;
++    assert(scroll_key('x',0));assert(history_position()==at); // typing is consumed
++    assert(scroll_key(KEYCODE_RETURN,0));assert(history_active());
++    scroll_feed("streaming new output\r\n");assert(history_position()==at);assert(history_cell(0,0)->c==first);
++    scroll_feed("\033[3J");assert(history_count()==0);assert(history_active());assert(history_cell(0,0)->c==first);
++    rows=7;cols=9;assert(history_cell(0,8));rows=r;cols=51;history_invalidate();
++    assert(scroll_key('b',0));assert(!history_active());assert(scroll_key('b',KEY_REPEAT));assert(!scroll_key('x',0));
++    /* Full screen scroll captures; interior scrolling does not. */
++    history_clear(buf);sr.top=1;sr.bottom=rows;buf_scroll_scroll_region();assert(history_count()==1);
++    sr.top=2;sr.bottom=rows-1;buf_scroll_scroll_region();assert(history_count()==1);sr.top=1;sr.bottom=rows;
++    /* Alternate-screen history remains isolated. */
++    buf_save_text();assert(history_count()==0);scroll_feed("alternate\r\n");buf_restore_text();assert(history_count()==1);
++    /* Touch down is deferred: swiping from the Meta hitbox cannot toggle it. */
++    history_clear(buf);buf_reset_text_buffer(buf);
++    for(i=0;i<65;i++){snprintf(line,sizeof(line),"%04d 中文对话记录 / conversation history\r\n",i);scroll_feed(line);}
++    metamode=0;scroll_touch_down(30,30);scroll_touch_move(32,250);scroll_touch_up(32,250);
++    assert(history_active());assert(!metamode);at=history_position();
++    scroll_touch_down(300,400);scroll_touch_move(300,310);scroll_touch_up(300,310);assert(history_position()>at);
++    scroll_touch_down(300,rows*text_height+10);scroll_touch_up(300,rows*text_height+10);assert(!history_active());
++    scroll_driver_test();
++    /* Pinyin preedit survives browsing; scroll keys don't become spelling. */
++    ime_switch_mode();const char *py="nihao";while(*py)ime_key(*py++,0);
++    assert(!strcmp(ime_spelling(),"nihao"));metamode=1;scroll_key('u',0);
++    assert(history_active());scroll_key('x',0);assert(!strcmp(ime_spelling(),"nihao"));
++    history_move(10000);assert(history_position()==0);
++    render();assert(SDL_SaveBMP(screen,"/accounts/1000/shared/misc/term49-scroll/scroll-test.bmp")==0);
++    history_live();assert(!strcmp(ime_spelling(),"nihao"));
++    render();assert(SDL_SaveBMP(screen,"/accounts/1000/shared/misc/term49-scroll/pinyin-test.bmp")==0);
++    ime_cancel();ime_switch_mode();
++    render();assert(SDL_SaveBMP(screen,"/accounts/1000/shared/misc/term49-scroll/controls-test.bmp")==0);
++    /* Pi full redraw clears stale saved lines and builds fresh history. */
++    scroll_feed("\033[2J\033[H\033[3J");assert(history_count()==0);
++    for(i=0;i<50;i++){snprintf(line,sizeof(line),"Pi redraw %d 中文\r\n",i);scroll_feed(line);}
++    assert(history_count()==50-rows+1);history_move(10000);assert(history_active());
++    assert(history_cell(0,0)->c=='P');assert(history_cell(0,10)->c=='0');
++    history_live();
++    fprintf(stderr,"SCROLL_TEST_OK: ring4096 wrap; frozen output/3J; resize; input shield; full/partial scroll; alternate screen; swipe directions; Pinyin preserved; Pi redraw; v2 controls/TCO event queue\n");
++}
++
+ int main(int argc, char **argv) {
+ 	int rc;
++	cjk_render_test = argc > 1 && strcmp(argv[1], "--render-test") == 0;
++	setenv("TERM49_CJK", "1", 1);
+ 
+ 	/* Switch to our home directory */
+ 	char* home = getenv("HOME");
+@@ -1400,6 +1778,16 @@
+ 		return TERM_FAILURE;
+ 	}
+ 
++    {
++        char userdir[1024],userdict[1100];
++        snprintf(userdir,sizeof(userdir),"%s/.term49-ime",getenv("HOME")?getenv("HOME"):".");
++        mkdir(userdir,0700);chmod(userdir,0700);
++        snprintf(userdict,sizeof(userdict),"%s/user.dat",userdir);
++        mode_t oldmask=umask(0077);
++        int ready=ime_init("/accounts/1000/shared/misc/term49-ime/dict_pinyin.dat",userdict,ime_send_text);
++        umask(oldmask);
++        fprintf(stderr,"PINYIN_READY=%d\n",ready);
++    }
+ 	/* initialize SDL video etc */
+ 	if (TERM_SUCCESS != sdl_init()) {
+ 		PRINT(stderr, "Unable to initialize SDL\n");
+@@ -1407,6 +1795,39 @@
+ 		return TERM_FAILURE;
+ 	}
+ 
++
++  fprintf(stderr,"TERM49_CJK_READY cols=%d rows=%d cell=%d line=%d\n",cols,rows,advance,text_height);
++  fflush(stderr);
++  if(argc>1 && !strcmp(argv[1],"--scroll-test")){
++    scroll_integration_test();signal(SIGCHLD,SIG_IGN);kill(child_pid,SIGTERM);waitpid(child_pid,NULL,0);uninit();return 0;
++  }
++  if (cjk_render_test) {
++    const char *sample="Term49 CJK - Andale + Noto\r\n"
++      "ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\nabcdefghijklmnopqrstuvwxyz 0123456789\r\n"
++      "\xe4\xb8\xad\xe6\x96\x87\xe6\x98\xbe\xe7\xa4\xba\xe6\xad\xa3\xe5\xb8\xb8 ABC 123\r\n"
++      "GLM 5.3 Flash /help /exit\r\n"
++      "\xe4\xbd\xa0\xe5\xa5\xbd\xef\xbc\x8c\xe4\xb8\x96\xe7\x95\x8c\xef\xbc\x81\r\n";
++    UChar decoded[1024];
++    int n=io_read_utf8_string(sample,strlen(sample),decoded);
++    ecma48_filter_text(decoded,n);
++    for (int k=0;k<cols/2+5;k++) { UChar h=0x4e2d; ecma48_filter_text(&h,1); }
++    UChar eol[]={13,10};ecma48_filter_text(eol,2);
++    ime_switch_mode();
++    const char *py="nihao";while(*py)ime_key(*py++,0);
++    render();
++    int saved=SDL_SaveBMP(screen,"/accounts/1000/shared/misc/term49-ime/render-test.bmp");
++    fprintf(stderr,"RENDER_TEST saved=%d cursor_col=%d\n",saved,buf->col);
++    SDL_Delay(2000);
++    signal(SIGCHLD,SIG_IGN);kill(child_pid,SIGTERM);waitpid(child_pid,NULL,0);
++    uninit();return saved?1:0;
++  }
++
++    {
++        const char *banner="\033[32mTerm49 Pinyin + Scroll v2 | Tap buttons\033[0m\r\n";
++        UChar decoded[128];
++        int n=io_read_utf8_string(banner,strlen(banner),decoded);
++        ecma48_filter_text(decoded,n);
++    }
+ 	/* render the symmenus */
+ 	prefs->main_symmenu->surface = render_symmenu(screen, prefs, prefs->main_symmenu);
+ 	for (char c = 'a'; c <= 'z'; ++c) {
+@@ -1451,7 +1872,7 @@
+ 				UChar uc;
+ 				char sdlkey = event.key.keysym.sym;
+ 				uc = (UChar)sdlkey;
+-				io_write_master(&uc, 1);
++				if(!scroll_key(uc,0))io_write_master(&uc, 1);
+ 			}
+ 			break;
+ 		case SDL_SYSWMEVENT:
+@@ -1462,9 +1883,11 @@
+ 				PRINT(stderr, "Unhandled SYSWMEVENT: %d\n", domain);
+ 			}
+ 			break;
+-		case SDL_MOUSEBUTTONDOWN:
+-			handle_mousedown(event.button.x, event.button.y);
+-			break;
++        case SDL_MOUSEBUTTONDOWN:
++        case SDL_MOUSEBUTTONUP:
++        case SDL_MOUSEMOTION:
++            scroll_mouse_event(&event);
++            break;
+ 		case SDL_ACTIVEEVENT:
+ 			handle_activeevent(event.active.gain, event.active.state);
+ 			break;
+--- a/src/preferences.c
++++ b/src/preferences.c
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ /*
+  * Copyright (c) 2013 Todd Mortimer
+  *
+@@ -373,6 +374,9 @@
+ 	free(pref->metamode_func_keys);
+ 
+ 	destroy_symmenu(pref->main_symmenu);
++  for (int i=0;i<26;++i) for (int j=0;j<2;++j) destroy_symmenu(pref->accent_menus[i][j]);
++  m=pref->altsym_entries;
++  if (m) { while (m->to != NULL) { free(m->to); ++m; } free(pref->altsym_entries); }
+ 	
+ 	free(pref->keyhold_actions_exempt);
+ 
+--- a/src/preferences.h
++++ b/src/preferences.h
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ /*
+  * Copyright (c) 2013 Todd Mortimer
+  *
+@@ -28,8 +29,8 @@
+ #include "symmenu.h"
+ #include "SDL.h"
+ 
+-#define PREFS_FILE_PATH ".term49rc"
+-#define PREFS_FILE_BACKUP ".term49rc-old"
++#define PREFS_FILE_PATH ".term49cjkrc"
++#define PREFS_FILE_BACKUP ".term49cjkrc-old"
+ #define README_FILE_PATH "../app/native/README"
+ #define README45_FILE_PATH "../app/native/README45"
+ 
+@@ -38,7 +39,7 @@
+ 
+ static int PREFS_VERSION = 9;
+ 
+-#define DEFAULT_FONT_PATH "/usr/fonts/font_repository/monotype/andalemo.ttf"
++#define DEFAULT_FONT_PATH "/accounts/1000/shared/misc/term49-cjk/NotoSansMonoCJKsc-Regular.otf"
+ #define DEFAULT_FONT_SIZE 24//40
+ #define DEFAULT_TEXT_COLOR (int[]){255, 255, 255}
+ #define DEFAULT_BACKGROUND_COLOR (int[]){0, 0, 0}
+--- /dev/null
++++ b/src/scrollback.c
+@@ -0,0 +1,93 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
++#include <stdlib.h>
++#include <string.h>
++#include "SDL.h"
++#include "buffer.h"
++#include "scrollback.h"
++extern buf_t *buf;
++extern int rows, cols, TEXT_BUFFER_SIZE;
++extern struct font_style default_text_style;
++struct history_line { struct screenchar *cells; int width; };
++struct history { struct history_line ring[HISTORY_LIMIT]; int start, count; };
++/* Frozen copy: output and CSI 3J can continue without moving the reader. */
++static struct history_line *snapshot;
++static int total, position;
++static struct screenchar *view;
++static int view_rows,view_cols,view_position=-1;
++static void release_line(struct history_line *l) { free(l->cells);l->cells=NULL;l->width=0; }
++static int copy_line(struct history_line *dst,struct screenchar *src,int width) {
++    int i;dst->cells=calloc(width,sizeof(*src));if(!dst->cells)return 0;
++    dst->width=width;
++    for(i=0;i<width;i++){dst->cells[i]=src[i];dst->cells[i].surface=NULL;}
++    return 1;
++}
++void history_invalidate(void) {
++    int i;if(view){for(i=0;i<view_rows*view_cols;i++)buf_free_char(view+i);free(view);}
++    view=NULL;view_position=-1;
++}
++void history_live(void) {
++    int i;history_invalidate();
++    if(snapshot){for(i=0;i<total;i++)release_line(snapshot+i);free(snapshot);}
++    snapshot=NULL;total=position=0;
++}
++void history_clear(buf_t *owner) {
++    int i;struct history *h=owner->history;if(!h)return;
++    for(i=0;i<HISTORY_LIMIT;i++)release_line(h->ring+i);
++    h->start=h->count=0;
++}
++/* A taller viewport reintroduces lines from the terminal's internal buffer. */
++void history_resize_top(int delta) {
++    int i;struct history *h=buf->history;
++    if(delta>0){for(i=buf->top_line-delta;i<buf->top_line;i++)if(i>=0 && i<TEXT_BUFFER_SIZE)history_append(buf->text[i],cols);}
++    else if(h){while(delta++<0 && h->count){int slot=(h->start+h->count-1)%HISTORY_LIMIT;release_line(h->ring+slot);h->count--;}}
++}
++void history_destroy(buf_t *owner) {history_clear(owner);free(owner->history);owner->history=NULL;}
++void history_append(struct screenchar *line,int width) {
++    struct history_line next={0};struct history *h=buf->history;int slot;
++    if(!h){h=calloc(1,sizeof(*h));if(!h)return;buf->history=h;}
++    if(!copy_line(&next,line,width))return;
++    slot=(h->start+h->count)%HISTORY_LIMIT;
++    if(h->count==HISTORY_LIMIT){release_line(h->ring+slot);h->start=(h->start+1)%HISTORY_LIMIT;}
++    else h->count++;
++    h->ring[slot]=next;
++}
++int history_active(void){return snapshot!=NULL;}
++int history_count(void){return buf->history?buf->history->count:0;}
++int history_position(void){return position;}
++int history_total(void){return total;}
++void history_move(int older) {
++    int i;struct history *h=buf->history;
++    if(!snapshot){
++        if(older<=0 || !h || !h->count)return;
++        total=h->count+rows;snapshot=calloc(total,sizeof(*snapshot));
++        if(!snapshot){total=0;return;}
++        for(i=0;i<h->count;i++){
++            struct history_line *l=h->ring+(h->start+i)%HISTORY_LIMIT;
++            if(!copy_line(snapshot+i,l->cells,l->width)){history_live();return;}
++        }
++        for(i=0;i<rows;i++){
++            int index=buf->top_line+i;
++            if(index<TEXT_BUFFER_SIZE && !copy_line(snapshot+h->count+i,buf->text[index],cols)){history_live();return;}
++        }
++        position=h->count;
++    }
++    position-=older;if(position<0)position=0;
++    if(position>=total-rows){history_live();return;}
++    history_invalidate();
++}
++struct screenchar *history_cell(int row,int col) {
++    int i,j;if(!snapshot)return NULL;
++    if(!view || view_rows!=rows || view_cols!=cols || view_position!=position){
++        history_invalidate();view_rows=rows;view_cols=cols;view_position=position;
++        view=calloc(rows*cols,sizeof(*view));if(!view){history_live();return NULL;}
++        for(i=0;i<rows;i++)for(j=0;j<cols;j++){
++            struct screenchar *c=view+i*cols+j;
++            struct history_line *l=position+i<total?snapshot+position+i:NULL;
++            c->c=' ';c->style=default_text_style;
++            if(l && j<l->width)*c=l->cells[j];
++            /* A resize can clip the right half of a Chinese glyph. */
++            if(j==cols-1 && buf_char_width(c->c)==2)c->c=' ';
++        }
++    }
++    return view+row*cols+col;
++}
+--- /dev/null
++++ b/src/scrollback.h
+@@ -0,0 +1,19 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
++/* Bounded terminal scrollback. No SDL surfaces are retained in stored lines. */
++#ifndef SCROLLBACK_H
++#define SCROLLBACK_H
++#define HISTORY_LIMIT 4096
++struct history;
++void history_append(struct screenchar *line, int width);
++void history_clear(buf_t *owner);
++void history_resize_top(int delta);
++void history_destroy(buf_t *owner);
++void history_move(int older);
++void history_live(void);
++int history_active(void);
++int history_count(void);
++int history_position(void);
++int history_total(void);
++struct screenchar *history_cell(int row,int col);
++void history_invalidate(void);
++#endif
+--- a/src/symmenu.c
++++ b/src/symmenu.c
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ 
+ #include <ioctl.h>
+ #include <unix.h>
+@@ -25,16 +26,20 @@
+ #include "colors.h"
+ 
+ void destroy_symmenu(symmenu_t *menu) {
+-	for (symkey_t **row = menu->keys; row != NULL; ++row) {
+-		for (symkey_t *key = *row; key->map != NULL; ++key) {
+-			free(key->uc);
+-			free(key);
+-		}
+-		free(row);
+-	}
+-	
+-	free(menu->entries);
+-	SDL_FreeSurface(menu->surface);
++  if (!menu) return;
++  if (menu->keys) {
++    for (int row=0; menu->keys[row] != NULL; ++row) {
++      for (symkey_t *key=menu->keys[row]; key->map != NULL; ++key) free(key->uc);
++      free(menu->keys[row]);
++    }
++    free(menu->keys);
++  }
++  if (menu->entries) {
++    for (keymap_t *m=menu->entries; m->to != NULL; ++m) free(m->to);
++    free(menu->entries);
++  }
++  if (menu->surface) SDL_FreeSurface(menu->surface);
++  free(menu);
+ }
+ 
+ /* Use the preferences struct to initalize all the SDL stuff for symmenu */
+--- a/src/types.h
++++ b/src/types.h
+@@ -1,3 +1,4 @@
++/* Modified for BB10 Classic Toolkit, 2026-10-21; see ../MODIFICATIONS.md. */
+ #ifndef _TYPES_H
+ #define _TYPES_H
+ 
+@@ -39,7 +40,7 @@
+ 	
+ 	symmenu_t *main_symmenu;
+ 	symmenu_t *accent_menus[26][2];
+-	symmenu_t *altsym_entries;
++	keymap_t *altsym_entries;
+ 	
+ 	int sticky_sym_key, sticky_shift_key, sticky_alt_key;
+ 	int *keyhold_actions_exempt; /* terminated by -1 */

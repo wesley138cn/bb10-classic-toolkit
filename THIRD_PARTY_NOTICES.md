@@ -1,0 +1,14 @@
+# Attribution and license boundaries
+
+| Project | Role / included material | License treatment |
+| --- | --- | --- |
+| [BerryCore / sw7ft](https://github.com/sw7ft/BerryCore) and Berry Much OS predecessors | BB10/QNX userland, compiler and runtime ports; external prerequisite | No BerryCore distribution or modified bcllm launcher is republished here. On 2026-10-21 GitHub did not identify a repository-wide license and no root LICENSE was listed. This does not establish that every component is unlicensed; inspect each component before redistribution. |
+| [Term49 / BerryFarm](https://github.com/BerryFarm/Term49), continuing [Term48 / Todd Mortimer](https://github.com/mordak/Term48) | Complete adapted terminal C source, review patch | Apache-2.0 headers retained. See LICENSES/Term49-NOTICE.txt. Baseline source corresponds to the snapshot checked against commit a02f06232c3af9781d4a7f70ed5939e7447825f7. Modified files are listed in term49/MODIFICATIONS.md. |
+| SDL_ttf / Sam Lantinga | term49/src/SDL_ttf.c and SDL_ttf.h | Original zlib-style license is retained in the source headers; not relicensed by the repository root license. |
+| [libgooglepinyin](https://packages.debian.org/source/libgooglepinyin), based on AOSP Pinyin | External 0.1.2 source/dictionary; included QNX and bounds patches | Apache-2.0. Original archive URL and SHA-256 are in term49/dependencies.json. The decoder is not our original invention. |
+| [Pi / earendil-works](https://github.com/earendil-works/pi-mono) | External npm package @earendil-works/pi-coding-agent 0.74.2 and dependencies | Upstream package declares MIT; npm lockfiles preserve exact dependency resolution/integrities. No bundled Pi or node_modules is republished. Dependencies have their own licenses. |
+| [Noto CJK](https://github.com/notofonts/noto-cjk) | External Noto Sans Mono CJK SC | SIL OFL 1.1, reference text in LICENSES/OFL-1.1.txt. Download from its upstream with the pinned hash; retain upstream copyright notices if redistributing it. |
+| SDL, TouchControlOverlay, libconfig, ICU, FreeType, QNX/BB10 SDK | External build/runtime dependencies | Separate licenses apply. We do not bundle their libraries or proprietary SDK. Term49's existing NOTICE documents included upstream dependencies. |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp), [Qwen](https://github.com/QwenLM/Qwen2.5), [GGUF conversion](https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF) | External inference runner and model | Not redistributed. Obtain through the named projects and observe their respective licenses. |
+
+Copyright notices in third-party files are retained. Added toolkit source and documentation are offered under Apache License 2.0. This is a community project, unaffiliated with BlackBerry Limited and not endorsed by the upstream projects. Maintainer: wesley138cn. Development used AI assistance; device acceptance and limitations are documented rather than inferred from generated code.

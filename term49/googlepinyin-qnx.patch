@@ -1,0 +1,48 @@
+--- a/src/dicttrie.cpp
++++ b/src/dicttrie.cpp
+@@ -496,9 +496,9 @@
+                 mile_stones_[mile_stones_pos_].mark_start =
+                   parsing_marks_pos_;
+               parsing_marks_pos_++;
++              // Count only stored marks; exhausted pools must not form handles.
++              ret_val++;
+             }
+-
+-            ret_val++;
+           }
+           break;
+         }  // for son_pos
+@@ -574,9 +574,9 @@
+                 mile_stones_[mile_stones_pos_].mark_start =
+                   parsing_marks_pos_;
+               parsing_marks_pos_++;
++              // Count only stored marks; exhausted pools must not form handles.
++              ret_val++;
+             }
+-
+-            ret_val++;
+           }
+           break;
+         }
+--- a/src/matrixsearch.cpp
++++ b/src/matrixsearch.cpp
+@@ -1441,7 +1441,7 @@
+     lpi_total_ = lpi_num;
+ 
+   if (NULL == dmi_s) {  // from root
+-    assert(0 != handles[0]);
++    if (0 == handles[0]) return 0; // Dictionary pool exhausted: retain input, no extension.
+     mtrx_dmi_fr = dmi_pool_used_;
+   }
+ 
+--- a/src/spellingtable.cpp
++++ b/src/spellingtable.cpp
+@@ -44,7 +44,7 @@
+ size_t get_odd_next(size_t value) {
+   size_t v_next = value;
+   while (true) {
+-    size_t v_next_sqrt = (size_t)sqrt(v_next);
++    size_t v_next_sqrt = (size_t)sqrt(static_cast<double>(v_next));
+ 
+     bool is_odd = true;
+     for (size_t v_dv = 2; v_dv < v_next_sqrt + 1; v_dv++) {

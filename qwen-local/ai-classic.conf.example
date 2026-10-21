@@ -1,0 +1,10 @@
+# Classic SQC100-2: verified single-thread Qwen configuration
+default_model=qwen25_0_5b
+n_predict=32
+system_prompt=请用简洁的中文回答。
+temp=0.2
+threads=1
+context=512
+batch=512
+web_host=127.0.0.1
+web_port=8080
