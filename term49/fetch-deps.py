@@ -27,7 +27,9 @@ for name,item in spec.items():
                 archive.extractall(cache)
     elif name=='pinyin':
         dest=cache/'libgooglepinyin-0.1.2'
-        if not dest.exists():
+        patch_hash=hashlib.sha256((root/'googlepinyin-qnx.patch').read_bytes()).hexdigest()
+        stamp=dest/'.toolkit-patch-sha256'
+        if not stamp.exists() or stamp.read_text().strip()!=patch_hash:
             with tempfile.TemporaryDirectory(dir=cache) as td:
                 stage=pathlib.Path(td)
                 with tarfile.open(target) as archive:
@@ -37,5 +39,8 @@ for name,item in spec.items():
                     archive.extractall(stage)
                 folder=stage/'libgooglepinyin-0.1.2'
                 subprocess.run(['patch','--batch','-p1','-i',str(root/'googlepinyin-qnx.patch')],cwd=folder,check=True)
+                (folder/'.toolkit-patch-sha256').write_text(patch_hash+'\n')
+                # Replace only this generated cache, after the new patch succeeds.
+                if dest.exists():shutil.rmtree(dest)
                 shutil.move(str(folder),str(dest))
 print('Dependencies ready; nothing installed on a device.')

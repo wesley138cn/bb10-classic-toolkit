@@ -46,3 +46,28 @@
  
      bool is_odd = true;
      for (size_t v_dv = 2; v_dv < v_next_sqrt + 1; v_dv++) {
+--- a/src/spellingtrie.cpp
++++ b/src/spellingtrie.cpp
+@@ -92,11 +92,11 @@
+   }
+ 
+   if (NULL != dumb_node_) {
+-    delete [] dumb_node_;
++    delete dumb_node_; // Allocated as a single SpellingNode.
+   }
+ 
+   if (NULL != splitter_node_) {
+-    delete [] splitter_node_;
++    delete splitter_node_; // Allocated as a single SpellingNode.
+   }
+ 
+   if (NULL != instance_) {
+@@ -401,7 +401,7 @@
+ 
+   // Generate the maping from the spelling ids to the Yunmu ids.
+   if (spl_ym_ids_)
+-    delete spl_ym_ids_;
++    delete [] spl_ym_ids_; // Match the array allocation below when reopening.
+   spl_ym_ids_ = new uint8[spelling_num_ + kFullSplIdStart];
+   if (NULL == spl_ym_ids_)
+     return false;

@@ -11,7 +11,7 @@ Checked on the publication host, 2026-10-21 (Asia/Shanghai).
 - History: ASan/UBSan ring/frozen-view/resize/clear/teardown checks passed.
 - Pinyin: dictionary build, candidate/phrase/edit/reopen tests and 24,000 randomized edits passed under ASan/UBSan. Old decoder compilation emits format warnings; no sanitizer failure occurred. LeakSanitizer is disabled.
 - Term49: 18 recorded upstream source files matched the pinned upstream archive. The aggregate patch reconstructed the final terminal source exactly.
-- Decoder: fetched, patched src/include/tools match the previously accepted implementation.
+- Decoder: the initial fetched, patched src/include/tools matched the previously accepted implementation. Linux CI subsequently exposed mismatched array/scalar deallocation in spellingtrie.cpp; the published patch corrects it. This additional source fix has not been installed on the phone.
 - Dependency fetch: Term49 archive, decoder archive and Noto font hashes matched.
 - Source-only publication checks cover relative document links, Python syntax, known credential patterns and private workstation/device-path patterns. Source selection uses a curated file list and Git exclusions; pattern checks are not a guarantee against all possible secrets.
 
